@@ -1,0 +1,361 @@
+---
+title: "Uber Growth Data Challenge"
+author: "Justin Hilliard"
+date: "June 26, 2016"
+output: 
+  html_document:
+    toc:  true
+    toc_float:  true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prepare Environment
+
+Please open and inspect code. It is thoroughly commented. 
+
+```{r results="hide", messages=FALSE, warning=FALSE, error=FALSE}
+# load the packages
+library("ggplot2")
+library("plyr")
+library("dplyr")
+library("knitr")
+
+# load the CSV
+gotham_rides <- read.csv("~/Documents/Uber_interview/go_data_challenge.csv")
+
+# cast timestamp
+gotham_rides$request_timestamp <- as.POSIXct(gotham_rides$request_timestamp)
+# timestamp to date
+gotham_rides$request_date <- as.Date(gotham_rides$request_timestamp)
+# timestamp to hour
+gotham_rides$request_hour <- as.POSIXlt(gotham_rides$request_timestamp)$hour
+# date to week number in year
+gotham_rides$request_week <- as.numeric( format(gotham_rides$request_date+3, "%U"))
+# make df of drivers number of rides per week
+counts_per_driver_per_week <- ddply(gotham_rides, .(gotham_rides$request_week, gotham_rides$driver_id), nrow)
+# rename columns 
+names(counts_per_driver_per_week)[names(counts_per_driver_per_week)=="gotham_rides$driver_id"] <- "driver_id"
+names(counts_per_driver_per_week)[names(counts_per_driver_per_week)=="gotham_rides$request_week"] <- "request_week"
+names(counts_per_driver_per_week)[names(counts_per_driver_per_week)=="V1"] <- "counts_per_driver_per_week"
+gotham_rides <- merge(gotham_rides, counts_per_driver_per_week, by=c("driver_id", "request_week"))
+# unwrap ride distance
+# ride distance in dollars = fare / surge_multiplier
+gotham_rides$ride_distance <- (gotham_rides$fare/gotham_rides$surge_multiplier)
+# make df of drivers number of rides per week
+distance_per_driver_per_week <- ddply(gotham_rides, .(request_week, driver_id), summarize, distance_per_driver_per_week = sum(ride_distance))
+
+# make df centered around request_week and driver_id
+week_break_down <- merge(counts_per_driver_per_week, distance_per_driver_per_week, by=c("driver_id", "request_week"))
+
+
+
+assumption_calculator <- function(df, goal, bonus){
+  if(goal > 8){
+      # Given the set of Assumptions calculate the goal margins 
+      # to find the portion of the population that is affected 
+      # Magic number analysis
+      # .9 is 90% of the goal
+      # .75 is 750% of the goal
+      # .5 is 50% of the goal
+      margin_10 <- goal*0.9
+      margin_25 <- goal*0.75
+      margin_50 <- goal*0.5
+      
+      # Attempt to adjust for size of bonus relative to total driver compensation
+      # Adjuster = bonus_size / average driver compensation for goal rides
+      # Magic number analysis
+      # 8.954 average fare per ride
+      # Assumption: .5 drivers make half of fair the drive
+      adjust_for_bonus_size <- (bonus/(goal*8.954*.5))
+      
+      # Find the set of Drivers that are within goal margins
+      # adjust for number of Drivers impacted (given assumptions) and the size of the bonus (given assumptions )
+      # Number of Affected drivers = (total number of drivers in range) * (effected percentage) * (adjust for bonus size)
+      # Affected set of drivers is a random sample of the set drivers who have conducted a number of weekly rides in the goal range of the size Number of Affected drivers
+      # Magic number analysis
+      # .5 50% of drivers that are within 10% less than the goal are incentivized to reach the goal for the week
+      # .25 25% of drivers that are within 25% less than the goal are incentivized to reach the goal for the week
+      # .1 10% of drivers that are within 50% less than the goal are incentivized to reach the goal for the week
+      drivers_50_affected <- df[which(df$counts_per_driver_per_week < goal & df$counts_per_driver_per_week >= margin_10),]
+      rand_sel_quantity <- round(nrow(drivers_50_affected)*.5*adjust_for_bonus_size)
+      if (rand_sel_quantity < nrow(drivers_50_affected)){
+        drivers_50_affected <- sample_n(drivers_50_affected, rand_sel_quantity)
+      }
+      
+      
+      drivers_25_affected <- df[which(df$counts_per_driver_per_week < margin_10 & df$counts_per_driver_per_week >= margin_25),]
+      rand_sel_quantity <- round(nrow(drivers_25_affected)*.25*adjust_for_bonus_size)
+      if (rand_sel_quantity < nrow(drivers_25_affected)){
+        drivers_25_affected <- sample_n(drivers_25_affected, rand_sel_quantity)
+      }
+      
+      
+      drivers_10_affected <- df[which(df$counts_per_driver_per_week < margin_25 & df$counts_per_driver_per_week >= margin_50),]
+      rand_sel_quantity <- round(nrow(drivers_10_affected)*.1*adjust_for_bonus_size)
+      if (rand_sel_quantity < nrow(drivers_10_affected)){
+        drivers_10_affected <- sample_n(drivers_10_affected, rand_sel_quantity)  
+      }
+      
+      # Calculate the number of total trips that are added to the Uber economy 
+      # number of trips added to Uber economy = (number of drivers to be effected) * (rides to reach goal) - sum of rides that set of affected drivers did complete without the bonus
+      num_more_trips <- (nrow(drivers_50_affected)*goal - sum(drivers_50_affected$counts_per_driver_per_week)) + (nrow(drivers_25_affected)*goal - sum(drivers_25_affected$counts_per_driver_per_week)) + (nrow(drivers_10_affected)*goal - sum(drivers_10_affected$counts_per_driver_per_week))
+      
+      # Calculate the number of drivers that will reach the goal
+      # Number drivers who will reach goal = total number of drivers who are influenced by bonus to reach the goal + total number of drivers who already reach goal regardless of bonus
+      driver_reach_to_goal <- nrow(drivers_50_affected) + nrow(drivers_25_affected) + nrow(drivers_10_affected) + nrow(df[which(df$counts_per_driver_per_week >= goal),])
+      
+      # Calculate the price of the bonus
+      # price of the bonus = $ amount of bonus * Number drivers who will reach goal 
+      price <- (bonus * driver_reach_to_goal)
+      
+      # Calculate the net outcome in dollars of instituting the bonus
+      # net outcome of bonus in dollars = number of trips added to Uber economy * mean fare per ride - price of the bonus 
+      # Magic number analysis
+      # 8.954 is the mean fare per ride
+      is_effect <- num_more_trips*8.954-price
+  } else {
+      adjust_for_bonus_size <- (bonus/(goal*8.954*.5))
+      if (adjust_for_bonus_size > 2){
+              drivers_90_affected <- df[which(df$counts_per_driver_per_week < goal),]
+              rand_sel_quantity <- round(nrow(drivers_90_affected)*.9)
+              if (rand_sel_quantity < nrow(drivers_90_affected)){
+                  drivers_90_affected <- sample_n(drivers_90_affected, rand_sel_quantity)  
+              }
+      
+              num_more_trips <- (nrow(drivers_90_affected)*goal - sum(drivers_90_affected$counts_per_driver_per_week)) 
+              driver_reach_to_goal <- nrow(drivers_90_affected) + nrow(df[which(df$counts_per_driver_per_week >= goal),])
+              price <- (bonus * driver_reach_to_goal)
+              is_effect <- num_more_trips*8.954-price
+      } else {
+        num_more_trips <- -1
+        price <- -1
+        is_effect <- -1
+      }
+  }
+  #return all important information
+  return(c(num_more_trips, price, is_effect, goal, bonus))
+}
+
+optimizer <- function(df){
+  most_rides_optimize <- 0 
+  net_outcome_optimize <- c(0,0,0,0,0)
+  working_bonus_optimized <- c(0,0,0,0,0) 
+  
+  new_df <- data.frame(trips_added = double(), price=double(), net_outcome=double(), goal=double(), bonus=double())
+  
+  # Test series of Bonuses increments of $5 up to $1000
+  for (bonus in seq(1, 1000, 5)){
+    # Test series of different ride goals. 1 to 115 rides 
+    # 115 rides is the max number of rides anyone completed in a week
+    for (goal in 1:115){
+      step <- assumption_calculator(df, goal, bonus)
+      if (step[3] >= 0){
+        new_df <- rbind(new_df, step)
+        if (step[1] >= most_rides_optimize[1]) {
+          most_rides_optimize <- step
+        }
+        if(step[3] >= net_outcome_optimize[3]){
+          net_outcome_optimize <- step
+        }
+      }
+    }
+  }
+  most_rides_optimize_df <- as.data.frame(rbind(most_rides_optimize))
+  names(most_rides_optimize_df)[1] <- "trips_added"
+  names(most_rides_optimize_df)[2] <- "price"
+  names(most_rides_optimize_df)[3] <- "net_outcome"
+  names(most_rides_optimize_df)[4] <- "goal"
+  names(most_rides_optimize_df)[5] <- "bonus"
+  net_outcome_optimize_df <- as.data.frame(rbind(net_outcome_optimize))
+  names(net_outcome_optimize_df)[1] <- "trips_added"
+  names(net_outcome_optimize_df)[2] <- "price"
+  names(net_outcome_optimize_df)[3] <- "net_outcome"
+  names(net_outcome_optimize_df)[4] <- "goal"
+  names(net_outcome_optimize_df)[5] <- "bonus"
+
+  return(list(net_outcome_optimize_df, most_rides_optimize_df, new_df))
+}
+
+# This function can be used to see if bonus schemes are feasible at certain goal amounts
+# ASSUMING: 100% incentive rate
+calculate_upper_limit_b4_negative <- function(df, bonus){
+  most_number_rides_added <- 0 
+  best_goal <- 0
+  for (goal in 1:115){
+    drivers_under_goal <- df[which(df$counts_per_driver_per_week < goal),]
+    drivers_under_goal$rides_to_goal <- (goal - drivers_under_goal$counts_per_driver_per_week)
+    #8.954 is the mean ride price
+    rides_added <- sum(drivers_under_goal$rides_to_goal)
+    net_outcome <- rides_added*8.954 - nrow(df) * bonus
+    if (net_outcome > 0) {
+      print(paste("will work", goal, rides_added, net_outcome, sep=" "))
+      if (rides_added > most_number_rides_added) {
+        most_number_rides_added <- rides_added
+        best_goal <- goal
+      }
+    } else {
+      print(paste("NO : will not work", goal, rides_added, net_outcome, sep=" "))
+    }
+  }
+  return(c(best_goal, most_number_rides_added))
+}
+
+
+```
+
+## StakeHolder & Goals 
+
+The first step in the process is to identify stakeholders of our specific problem at hand
+
++ __Uber__ - Optimize for driver earnings per hour while efficiently matching supply and demand within the city of Gotham
++ __Hero Drivers (Drivers who drive more than median number of rides a week)__ - Reward their patronage. Ensure they continue being hero drivers. Encourage driving during peak hours (Supply does not meet Demand).
++ __Non-Hero Drivers (Drivers who drive less than median number of rides a week)__ - Encourage them to drive more to become hero drivers. Encourage them to drive when supply does not meet demand.
++ __Riders__ - Ensure riders have timely access to affordable rides 
+
+## Considerations
+
+Optimization of driver earnings will maximize long term revenues, increase customer satisfaction, provide a basis for long term growth and expand market share.  To optimize driver earnings, a program of driver incentives tied to peak hour pricing should be built in to the driver revenue sharing model.  To evaluate these incentives, consider this passage from Monetary Incentives and Mood published in the Journal of Marketing Research, Vol. 43, No. 2 (May, 2006).  See excerpt in Appendix.
+
+Monetary incentives can generate both positive and adverse consequences.  In this specific situation there are multiple facets of an incentive that we need to consider when optimizing this bonus.
+
+* With a Bonus baised purely on number of rides, driver are incentivized to complete rides more quickly.  When drivers are incentivized to complete trips more quickly the following issues may arise:
+    + Drivers are incentivized to drive faster to get the passenger to their destination more quickly 
+        - This is disadvantageous because if drivers drive faster, the assumption is they are more likely to be in a traffic accident. Traffic accidents not only put riders at risk, but are PR nightmares for Uber, and they also cut into the time that a driver could potentially be driving.
+    + Drivers are incentivized to only take riders who are looking to go short distances
+        - This is disadvantageous because it lengthens wait times for longer traveling profitable rides, and potentially causes riders to utilize other services.
+    + Drivers are incentivized to only take trips that pick up and let off in areas with high rider density.
+        - This is disadvantageous because it de-incentivizes drivers and riders to use Uber outside of high density rider areas.  As a result, longer wait times discourage riders from using Uber in less dense areas.
+  
+With all these considerations, there is more data needed to properly analyze the question.  I propose A/B testing specific bonus schemas to find real world values for the following:
+
+* Average wait times before and after bonuses.
+* Average ride speed before and after bonuses.
+* Average ride distance before and after bonuses. 
+* Difference in accident rates with and without bonus opportunities.
+* Difference in rides wait times for rides that are over the median ride distance before and after bonus opportunities.
+* Difference in rides wait times for rides that are outside of high density areas of a city before and after bonus
+* What the real-world impact of the bonus schema is for incentivizing users to drive more to meet bonuses 
+
+As researchers, we should also consider different bonus types, such as 
+
+* Bonus Schema associated with individual driver performance 
+    - Bonus for beating personal best
+    - Bonus for week over week growth
+* Bonus Schema associated with geographical performances 
+    - Bonus for Top drivers in the city
+* Bonus Schema associated with distance traveled 
+    - Bonus for beating personal best in distance
+    - Bonus for week over week growth in distance
+    - Bonus for going a certain distance
+* Multiple Tier Bonus Schemas
+    - multiple different bonuses that optimize for different driver groups
+* Bonus schemes for driving in high-demand rider times
+* Bonus schemes for driving in low-demand rider time
+* Gamified Bonus schemas
+
+Because of time constraints and nature of problem, I will only be exploring single tier frequency based bonus schemes, as specifically outlined by the prompt.
+
+## Assumptions 
+
+NOTE: There is a better way to optimize these assumptions using the trend line on the graph below titled “Drivers sensitivity to change in price”.  Given time constraints, the assumptions outlined below were used:
+
+```{r}
+# visualize surge impact
+# Given this graph it is clear that drivers respond to monetary incentives
+gotham_rides$ride_num<-1
+rides_surge_perday <- ddply(gotham_rides, .(request_date), summarize, average_day_surge=sum(surge_multiplier)/sum(ride_num), rides_per_day=sum(ride_num))
+ggplot(data = rides_surge_perday) + geom_line(aes(x=request_date, y=rides_per_day, colour="rides per day")) + geom_line(aes(x=request_date, y=average_day_surge*1000, colour="avg surge * 1000")) + geom_point(aes(x=request_date, y=rides_per_day)) + ggtitle("Proof drivers respond to incentives")
+ggplot(data = rides_surge_perday, aes(y=average_day_surge, x=rides_per_day)) + geom_line() + geom_smooth(method="lm", se=FALSE) + ggtitle("Drivers sensitivity to change in price")
+```
+
+NOTE: These assumptions also need to A/B tested, perhaps before and after bonus adoption in real world to compare response to incentives.
+
+* No bonus that has a negative net dollar outcome can be considered to optimize for rides
+* Drivers make 50% of the fare price
+    - Exact compensation scheme would be useful for analysis
+* Assumptions for Goals meant to effect Hero Drivers 
+    - 50% of drivers * bonus size adjustment multiple (defined below) that are within 10% less than the goal are incentivized to reach the goal for the week
+    - 25% of drivers * bonus size adjustment multiple (defined below) that are within 25% less than the goal are incentivized to reach the goal for the week
+    - 10% of drivers * bonus size adjustment multiple (defined below) that are within 50% less than the goal are incentivized to reach the goal for the week
+* Assumptions for Goals meant to effect Non Hero Drivers
+    - If a bonus is greater than two times the average salary for goal number of rides, then 90% of people who have not reached the goal are incentivized to reach the goal for the week
+    - Else bonus has no effect
+
+## Methodology 
+
+* Given the set of Assumptions calculate the goal margins to find the portion of the population that is affected 
+* Attempt to adjust for size of bonus relative to total driver compensation
+    - Adjuster (bonus size adjustment multiple) = bonus_size / average driver compensation for goal rides
+* Find the set of drivers that are within goal margins
+    - Adjust for number of drivers impacted (given the assumptions) and the size of the bonus (given the assumptions )
+    - Calculate by the way assumptions state bonus schemas affect Hero drivers 
+        + Number of affected drivers = (total number of drivers in range) * (effected percentage) * (adjuster for bonus size)
+        + Affected set of drivers is a random sample of the set drivers who have conducted a number of weekly rides in the goal range of the size equal to the Number of Affected drivers
+    - Calculate by the way assumptions state bonus schemas affect Non Hero drivers 
+        + If adjuster for bonus size greater than two, then the Affected set of drivers is all drivers under the current goal
+* Calculate the number of total trips that are added to the Uber economy 
+    - Number of trips added to Uber economy = (number of drivers to be affected) * (rides to reach goal) - sum of rides that set of affected drivers did complete without the bonus
+* Calculate the number of drivers that will reach the goal
+    - Number drivers who will reach goal = total number of drivers who are influenced by bonus to reach the goal + total number of drivers who already reach goal regardless of bonus
+* Calculate the price of the bonus
+    - price of the bonus = $ amount of bonus * Number drivers who will reach goal 
+* Calculate the net outcome in dollars of instituting the bonus
+    - net outcome of bonus in dollars = number of trips added to Uber economy * mean fare per ride - price of the bonus 
+
+## Optimization And Results 
+
+```{r}
+optimized <- optimizer(week_break_down)
+kable(as.data.frame(optimized[2]), caption = "Given Assumptions, Bonus and goal optimized to add most rides")
+kable(as.data.frame(optimized[1]), caption = "Given Assumptions, Bonus and goal optimized for highest net outcome")
+goal_bonus_combos_that_work_for_assumptions <- as.data.frame(optimized[3])
+
+names(goal_bonus_combos_that_work_for_assumptions)[1] <- "trips_added"
+names(goal_bonus_combos_that_work_for_assumptions)[2] <- "price"
+names(goal_bonus_combos_that_work_for_assumptions)[3] <- "net_outcome"
+names(goal_bonus_combos_that_work_for_assumptions)[4] <- "goal"
+names(goal_bonus_combos_that_work_for_assumptions)[5] <- "bonus"
+
+ggplot(data = goal_bonus_combos_that_work_for_assumptions, aes(x = goal, y=trips_added)) + geom_point() + ggtitle("Working Goals with how many trips\n they add to the Uber Economy")
+
+library("scatterplot3d") 
+s3d <-scatterplot3d(goal_bonus_combos_that_work_for_assumptions$bonus,goal_bonus_combos_that_work_for_assumptions$goal,goal_bonus_combos_that_work_for_assumptions$trips_added, pch=16, highlight.3d=TRUE,
+  type="h", main="3D Optimization Visual")
+fit <- lm(goal_bonus_combos_that_work_for_assumptions$trips_added ~ goal_bonus_combos_that_work_for_assumptions$bonus+goal_bonus_combos_that_work_for_assumptions$goal) 
+s3d$plane3d(fit)
+```
+
+As one can see from chart 1, there are no goals and bonus schemes that work for our assumptions for the Non Hero Drivers.  Given our assumptions, a bonus scheme designed for Hero Drivers is an optimal choice. Because there is a bit of randomness, I would suggest placing the bonus at 110 rides for $290.  This should more than 1000 more rides to the Uber economy, because our assumptions are very conservative.
+
+## References
+
+* Monetary Incentives and Mood, Author(s): Margaret G. Meloy, J. Edward Russo and Elizabeth Gelfand Miller, Source: Journal of Marketing Research, Vol. 43, No. 2 (May, 2006), pp. 267-275, Published by: American Marketing Association, Stable URL: http://www.jstor.org/stable/30163393
+
+## Appendix
+
+### Uber VP of Engineeing Paraphrase
+
+> For Uber, the right answer for pricing isn’t to maximize fares per trip (top line revenue), it’s to optimize for driver earnings per hour while efficiently matching supply and demand within their market.
+Even Uber’s controversial dynamic surge pricing is closely underpinned by market economics with all the transaction’s participants in mind. For example, when a hotel surges its prices over a holiday weekend, it doesn’t increase the salaries of its desk staff, porters and room service providers (dynamic pricing has also allowed sites like Priceline and Hotel Tonight to flourish, since hotels stuck with extra room inventory will frequently drop prices rather than let an empty room go unused). By comparison, Uber’s dynamic pricing not only passes through more earnings to drivers during periods of demand imbalances, it also incentivizes more drivers to hit the road to balance supply and demand.
+In other words, public complaints aside, Uber’s surge pricing doesn’t just make rides cost more, it makes the overall transportation market more efficient so drivers maximize their revenue and more people get rides. Uber knows exactly what operating metrics it needs to optimize for to deliver the most aggregate customer value in its market, and so all of its data science and product design efforts are focused on few transparent growth metrics.
+
+### passage from Monetary Incentives and Mood published in the Journal of Marketing Research
+
+> Further bolstering the value of incentives is the belief that even if incentives fail to enhance performance (e.g., because of a performance ceiling), they can do no harm. Thus, even if the benefits of incentives are not universally present (and such a universal claim is impossible to validate), the absence of harm completes the argument for their necessity. Any effective counterargument must demonstrate not only that incentives are sometimes ineffective but also that they actually degrade performance in at least some common situations. In contrast to economists, psychologists have resisted using financial inducements in experimentation on the grounds that incentives can negatively affect task performance. First, a monetary payment may undermine intrinsic motivation to engage in the task, which in turn leads to poorer performance (Bahrick 1954; Deci 1971; Eisenberger and Cameron 1996; Gneezy and Rustichini 2000; Heyman and Ariely 2004; Lepper, Greene, and Nisbett 1973; McGraw 1978; Ryan and Deci 2000). Second, incentives may hurt performance if individuals exert "too much effort" when a simpler heuristic would suffice (Arkes, Dawes, and Christiansen 1999; Camerer and Hogarth 1999). Psycholo- gists who have tried to provide a framework for understand- ing when incentives help versus hurt have concluded that aspects of the decision environment, such as complexity, presence of feedback, time pressure, and risk, affect the specific impact of the incentive on performance (e.g., Ash- ton 1990; Hogarth et al. 1991). Shah, Higgins, and Fried- man (1998, p. 285) conclude that the "perceived value of an incentive lies in the extent to which it supports an individ- ual's goals." The current work contributes to the understanding of incentives by identifying a third way that they can lead to degraded performance. In particular, we suggest that mone- tary incentives can elevate mood and that this elevated mood can lead to performance decrements in some tasks. By examining this third path, we hope to bring psycholo- gists and economists closer together in their understanding of the impact of incentives on decision making and to sug- gest that using incentives in experimental work can have unintended effects.
+
+```{r}
+summary(week_break_down)
+summary(gotham_rides$ride_distance)
+
+head(gotham_rides[which(gotham_rides$request_week==1 & gotham_rides$driver_id==14), ]$ride_distance)
+
+ggplot(data = gotham_rides) + geom_point(aes(x=request_timestamp, y=surge_multiplier)) + stat_smooth()
+
+ggplot(data = distance_per_driver_per_week) + geom_histogram(aes(x=distance_per_driver_per_week), binwidth = 10)
+
+ggplot(data = counts_per_driver_per_week) + geom_histogram(aes(x=counts_per_driver_per_week), binwidth = 2) + facet_wrap(~request_week)
+```
